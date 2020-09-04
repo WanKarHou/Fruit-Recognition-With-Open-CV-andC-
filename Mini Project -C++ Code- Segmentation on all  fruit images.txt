@@ -1,0 +1,177 @@
+
+#include	<opencv2/opencv.hpp>
+#include	<opencv2/highgui/highgui.hpp>
+#include	<opencv2/imgproc.hpp>
+#include	<iostream>
+#include	"Supp.h"
+#include <fstream>
+#include <experimental/filesystem>
+#include <memory>
+
+
+/*void drawHSVHistogram(Mat HSV, Mat V, char s[]) {
+	// Below is the step to generate a histogram (frequency count) of the input image intensity
+	// excluding the dark points
+	/// Establish the number of bins
+	int histSize = 256;
+
+	/// Set the ranges for counting, i.e. intensity outside of this range is not counted
+	float range[] = { 0, 256 };
+	const float *histRange = { range };
+
+	bool uniform = true; bool accumulate = false;
+	Mat		histogram;
+	int		emptyCount; // The count of dark point or empty area
+
+						// Compute the histograms: its input parameters are
+						// HSV: the input image or images
+						// 2nd input: number of images in srcI
+						// 3rd input: list of channels in each image for the computation, the first channel is 0
+						// 4th input: optional mask; if it is empty, no effect
+						// 5th: output matrix
+						// 6th: Histogram dimensionality, 1D histogram, 2D histogram, ...
+						// 7th: Array of histogram sizes in each dimension
+						// 8th: Array of the dims arrays of the histogram bin boundaries in each dimension
+						// 9th: Flag indicating whether the histogram is uniform or not, i.e. uniform have one
+						//      range in each dimension. Else it has multiple ranges with no count on out of range intensity.
+						// 10th: Accumulation flag. If it is set, the histogram is not cleared in the beginning 
+	calcHist(&V, 1, 0, Mat(), histogram, 1, &histSize, &histRange, uniform, accumulate);
+	emptyCount = histogram.at<float>(0);
+	calcHist(&HSV, 1, 0, Mat(), histogram, 1, &histSize, &histRange, uniform, accumulate);
+	histogram.at<float>(0) -= emptyCount;
+	cout << "Histogram values:";
+	for (int i = 0; i < 256; i++) { // This part is important for you to access the histogram value at each bin
+		if (i % 16 == 0) cout << "\n";
+		cout << histogram.at<float>(i) << ' ';
+	}
+	cout << "\n\n";
+
+	// Draw the histograms 
+	int		hist_w = 512; int hist_h = 400;
+	int		bin_w = cvRound((double)hist_w / histSize);
+
+	Mat histImage(hist_h, hist_w, CV_8UC3, Scalar(0, 0, 0)); // create image to display histogram later
+
+															 /// Normalize the result to [ 0, histImage.rows ]
+	normalize(histogram, histogram, 0, histImage.rows, NORM_MINMAX, -1, Mat());
+
+	/// Draw histogram, each point is specified by its column and then row number.
+	for (int i = 1; i < histSize; i++)
+		line(histImage, Point(bin_w*(i - 1), hist_h - cvRound(histogram.at<float>(i - 1))),
+			Point(bin_w*(i), hist_h - cvRound(histogram.at<float>(i))),
+			Scalar(255, 0, 0), 2, 8, 0);
+	imshow(s, histImage);
+}
+*/
+
+int segmentObject(Mat threeImages[3], char name[]) {
+	Mat			srcI = imread(name), tmp, cannyEdge;
+
+	if (srcI.empty()) {
+		cout << "cannot open " << name << endl;
+		return -1;
+	}
+
+	int const	noOfImagePerCol = 2, noOfImagePerRow = 3; // create a 2X4 window partition
+	Mat			largeWin, largeWin1, win[noOfImagePerRow * noOfImagePerCol], // create the new window
+		legend[noOfImagePerRow * noOfImagePerCol]; // and the means to each sub-window
+	int			winI = 0;
+
+	int			ratio = 3, kernelSize = 3; // set parameters for Canny
+	Mat			B = (Mat_<unsigned char>(3, 3) << 1, 1, 1,  // define Bel 1
+		1, 1, 1,
+		1, 1, 1);
+
+	createWindowPartition(srcI, largeWin, win, legend, noOfImagePerCol, noOfImagePerRow);
+
+	copyMakeBorder(srcI, srcI, 4, 4, 4, 4, BORDER_CONSTANT, Scalar(255, 255, 255));
+	resize(srcI, srcI, Size(100, 100));
+
+	GaussianBlur(srcI, win[0], Size(3, 3), 0, 0);
+	//srcI.copyTo(win[0]); // copy the input to the first subwindow
+	putText(legend[0], "Gaussian blur 3", Point(5, 11), 1, 0.7, Scalar(250, 250, 250), 1); // place text in the first legend window
+	Canny(srcI, cannyEdge, 60, 60 * ratio, kernelSize);
+	dilate(cannyEdge, cannyEdge, B); // Make edge thicker to fill gap/break
+	erode(cannyEdge, cannyEdge, B, Point(-1, -1)); // Make edge thinner to get back the original edge as much as possible
+
+	vector<vector<Point> >	contours;
+	vector<Vec4i>			hierarchy;
+
+	findContours(cannyEdge, contours, hierarchy, RETR_LIST, CHAIN_APPROX_NONE);
+	RNG				rng(12345);
+	Scalar			color;
+	int				index, max = 0;
+
+	srcI.copyTo(tmp);
+	tmp = Scalar(0, 0, 0);
+
+	for (int i = 0; i < contours.size(); i++) {
+		if (max < contours[i].size()) { // Find the longest contour as fish boundary
+			max = contours[i].size();
+			index = i;
+		}
+	}
+	drawContours(tmp, contours, index, Scalar(255, 255, 255)); // hihglight fish boundary
+	tmp.copyTo(win[1]);
+	putText(legend[1], "Fruit boundary", Point(5, 11), 1, 0.8, Scalar(250, 250, 250), 1);
+
+	vector<Point>	vp = contours[index]; //access each contour point
+	Point2i			p;
+	int				count = 0;
+
+	p.x = p.y = 0;
+	for (int j = 0; j < vp.size(); j++) // Add all point coordinates
+		p += vp[j];
+	p.x /= vp.size(); // take average, i.e. center of fish
+	p.y /= vp.size();
+	floodFill(tmp, p, Scalar(255, 255, 255)); // fill inside fish boundary
+	erode(tmp, tmp, B, Point(-1, -1)); // attempt to eliminate empty space around boundary
+	win[2] = win[0] & tmp;
+	remove(name);
+	imwrite(name, win[2]);
+	
+	
+	putText(legend[2], "Fruit tidied up", Point(5, 11), 1, 0.8, Scalar(250, 250, 250), 1);
+	
+	// Section 2: access the H, S, V (I) components of each point
+	Mat		hsv;
+
+	cvtColor(win[2], hsv, COLOR_BGR2HSV);
+	split(hsv, threeImages);
+	cvtColor(threeImages[0], win[3], COLOR_GRAY2BGR);
+	putText(legend[3], "Hue", Point(5, 11), 1, 1, Scalar(250, 250, 250), 1);
+	cvtColor(threeImages[1], win[4], COLOR_GRAY2BGR);
+	putText(legend[4], "Saturation", Point(5, 11), 1, 1, Scalar(250, 250, 250), 1);
+	cvtColor(threeImages[2], win[5], COLOR_GRAY2BGR);
+	putText(legend[5], "Intensity", Point(5, 11), 1, 1, Scalar(250, 250, 250), 1);
+
+	//namedWindow(name, WINDOW_NORMAL);
+	//imshow(name, largeWin);
+}
+
+int main(int argc, char** argv) {
+	Mat		threeImages[3], hsv;
+
+	// The line below does what has been done in Ex 2
+	namespace fs = std::experimental::filesystem;
+	fs::path path("C:\\FruitImages");
+	for (auto& p : fs::directory_iterator(path))
+	{
+		for (auto& s : fs::directory_iterator(p))
+		{
+			const auto pathnameStr = s.path().string();
+						
+
+				char* c = const_cast<char*>(pathnameStr.c_str());
+				segmentObject(threeImages, (char *) c);
+		}
+		
+			
+		
+		//drawHSVHistogram(threeImages[0], threeImages[2], (char *) "H Histogram for Apple Crimson Snow.jpg");
+	   //drawHSVHistogram(threeImages[1], threeImages[2], (char *) "S Histogram for Apple Crimson Snow.jpg");
+		//drawHSVHistogram(threeImages[2], threeImages[2], (char *) "V Histogram for White crappie.png"); // This one is not useful
+	}
+	waitKey();
+	return 0;
+}
